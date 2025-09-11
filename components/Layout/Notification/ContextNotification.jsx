@@ -11,6 +11,8 @@ import {
     useState,
 } from "react";
 import { registerForPushNotificationsAsync } from "../../../utils/registerForPushNotificationsAsync";
+import { getCurrentUser } from "../../../services/salidasStorage";
+import { addNotification, listNotifications, markNotificationRead } from "../../../services/notificationsStorage";
 
 const NotificationContext = createContext(undefined);
 
@@ -28,6 +30,7 @@ export const NotificationProvider = ({ children }) => {
   const [countNotification, setCountNotification] = useState(0);
   const [iconColor, setIconColor] = useState('black');
   const [error, setError] = useState(null);
+  const [currentUser, setCurrentUser] = useState(null);
 
   const notificationListener = useRef(null);
   const responseListener = useRef(null);
@@ -37,25 +40,92 @@ export const NotificationProvider = ({ children }) => {
 
   const restartCountNotification = () => setCountNotification(0);
 
-  const markAsRead = useCallback((index) => {
-    setNotifications((prev) => {
-      const updated = [...prev];
-      if (updated[index] && !updated[index].read) {
-        updated[index] = { ...updated[index], read: true };
-        setCountNotification((prevCount) => Math.max(prevCount - 1, 0));
+  // Load user-specific notifications from storage
+  const loadNotifications = useCallback(async () => {
+    try {
+      const user = await getCurrentUser();
+      if (user) {
+        setCurrentUser(user);
+        const userNotifications = await listNotifications(user.id);
+        setNotifications(userNotifications);
+        
+        // Update count of unread notifications
+        const unreadCount = userNotifications.filter(n => !n.read).length;
+        setCountNotification(unreadCount);
       }
-      return updated;
-    });
+    } catch (error) {
+      console.error('Error loading notifications:', error);
+    }
   }, []);
 
-  const markAllAsRead = useCallback(() => {
-    setNotifications((prev) => {
-      const unreadCount = prev.filter((n) => !n.read).length;
-      if (unreadCount > 0) {
-        setCountNotification((prevCount) => Math.max(prevCount - unreadCount, 0));
-      }
-      return prev.map((n) => ({ ...n, read: true }));
-    });
+  const markAsRead = useCallback(async (notificationId) => {
+    try {
+      await markNotificationRead(notificationId);
+      
+      setNotifications((prev) => {
+        const updated = prev.map(n => 
+          n.id === notificationId ? { ...n, read: true } : n
+        );
+        
+        // Update count
+        const unreadCount = updated.filter(n => !n.read).length;
+        setCountNotification(unreadCount);
+        
+        return updated;
+      });
+    } catch (error) {
+      console.error('Error marking notification as read:', error);
+    }
+  }, []);
+
+  const markAllAsRead = useCallback(async () => {
+    try {
+      if (!currentUser) return;
+      
+      // Mark all as read in storage
+      const promises = notifications
+        .filter(n => !n.read)
+        .map(n => markNotificationRead(n.id));
+      
+      await Promise.all(promises);
+      
+      setNotifications((prev) => prev.map(n => ({ ...n, read: true })));
+      setCountNotification(0);
+    } catch (error) {
+      console.error('Error marking all notifications as read:', error);
+    }
+  }, [notifications, currentUser]);
+
+  // Handle incoming notifications
+  const handleIncomingNotification = useCallback(async (notification) => {
+    try {
+      const title = notification?.request?.content?.title?.trim();
+      if (!title) return;
+
+      const user = await getCurrentUser();
+      if (!user) return;
+
+      // Extract additional data from notification payload
+      const data = notification?.request?.content?.data || {};
+      
+      const newNotification = {
+        userId: user.id, // Assign to current user
+        message: title,
+        read: false,
+        salidaId: data.salidaId || null,
+        estado: data.estado || null,
+      };
+
+      // Save to persistent storage
+      const savedNotification = await addNotification(newNotification);
+      
+      // Update local state
+      setNotifications((prev) => [...prev, savedNotification]);
+      setCountNotification((prevCount) => prevCount + 1);
+      
+    } catch (error) {
+      console.error('Error handling incoming notification:', error);
+    }
   }, []);
 
   useEffect(() => {
@@ -65,18 +135,10 @@ export const NotificationProvider = ({ children }) => {
       })
       .catch((err) => setError(err));
 
-    notificationListener.current = Notifications.addNotificationReceivedListener((notification) => {
-      const title = notification?.request?.content?.title?.trim();
-      if (!title) return;
+    // Load notifications on mount
+    loadNotifications();
 
-      const newNotification = {
-        message: title,
-        read: false,
-      };
-
-      setNotifications((prev) => [...prev, newNotification]);
-      setCountNotification((prevCount) => prevCount + 1);
-    });
+    notificationListener.current = Notifications.addNotificationReceivedListener(handleIncomingNotification);
 
     responseListener.current = Notifications.addNotificationResponseReceivedListener((response) => {
       console.log("🔔 Notification Response:", JSON.stringify(response, null, 2));
@@ -90,7 +152,7 @@ export const NotificationProvider = ({ children }) => {
         Notifications.removeNotificationSubscription(responseListener.current);
       }
     };
-  }, []);
+  }, [loadNotifications, handleIncomingNotification]);
 
   const value = useMemo(() => ({
     notifications,
@@ -98,19 +160,23 @@ export const NotificationProvider = ({ children }) => {
     iconColor,
     expoPushToken,
     error,
+    currentUser,
     setPrimaryColor,
     setDefaultColor,
     restartCountNotification,
     markAsRead,
     markAllAsRead,
+    loadNotifications,
   }), [
     notifications,
     countNotification,
     iconColor,
     expoPushToken,
     error,
+    currentUser,
     markAsRead,
     markAllAsRead,
+    loadNotifications,
   ]);
 
   return (
